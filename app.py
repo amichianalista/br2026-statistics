@@ -7,13 +7,10 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-import psycopg
 import streamlit as st
-from psycopg.rows import dict_row
 from supabase import Client, create_client
 
 
-SCHEMA = "br_2026"
 CURRENT_SEASON = 2026
 APP_TITLE = "Amichi Score"
 APP_SUBTITLE = "Brasileirao 2026"
@@ -57,29 +54,24 @@ def get_supabase_key() -> str | None:
     return get_config("SUPABASE_SERVICE_ROLE_KEY") or get_config("SUPABASE_SECRET_KEY")
 
 
+def get_supabase_schema() -> str:
+    return get_config("SUPABASE_SCHEMA", "public") or "public"
+
+
 def has_supabase_config() -> bool:
     return bool(get_config("SUPABASE_URL") and get_supabase_key())
 
 
-def has_database_url() -> bool:
-    return bool(get_config("DATABASE_URL"))
+def get_missing_supabase_settings() -> list[str]:
+    missing_fields: list[str] = []
 
+    if not get_config("SUPABASE_URL"):
+        missing_fields.append("SUPABASE_URL")
 
-def get_missing_database_settings() -> list[str]:
-    if has_supabase_config():
-        return []
+    if not get_supabase_key():
+        missing_fields.append("SUPABASE_SERVICE_ROLE_KEY or SUPABASE_SECRET_KEY")
 
-    if has_database_url():
-        return []
-
-    required_fields = [
-        "DATABASE_HOST",
-        "DATABASE_PORT",
-        "DATABASE_NAME",
-        "DATABASE_USER",
-        "DATABASE_PASSWORD",
-    ]
-    return [field for field in required_fields if not get_config(field)]
+    return missing_fields
 
 
 @lru_cache(maxsize=1)
@@ -91,22 +83,6 @@ def get_supabase_client() -> Client:
         raise ValueError("Supabase URL ou chave nao configurados.")
 
     return create_client(supabase_url, supabase_key)
-
-
-def get_connection() -> psycopg.Connection:
-    database_url = get_config("DATABASE_URL")
-    if database_url:
-        return psycopg.connect(database_url, row_factory=dict_row)
-
-    return psycopg.connect(
-        host=get_config("DATABASE_HOST"),
-        port=get_config("DATABASE_PORT"),
-        dbname=get_config("DATABASE_NAME"),
-        user=get_config("DATABASE_USER"),
-        password=get_config("DATABASE_PASSWORD"),
-        sslmode=get_config("DATABASE_SSLMODE", "require"),
-        row_factory=dict_row,
-    )
 
 
 def calculate_age(birth_date: date | None) -> int | None:
@@ -170,9 +146,10 @@ def normalize_player(row: dict[str, Any]) -> dict[str, Any]:
 
 def load_players_from_supabase() -> list[dict[str, Any]]:
     supabase = get_supabase_client()
+    schema = get_supabase_schema()
 
     players_response = (
-        supabase.schema(SCHEMA)
+        supabase.schema(schema)
         .table("jogadores")
         .select(
             ",".join(
@@ -200,7 +177,7 @@ def load_players_from_supabase() -> list[dict[str, Any]]:
     )
 
     teams_response = (
-        supabase.schema(SCHEMA)
+        supabase.schema(schema)
         .table("times")
         .select(
             ",".join(
@@ -251,48 +228,7 @@ def load_players_from_supabase() -> list[dict[str, Any]]:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_players() -> list[dict[str, Any]]:
-    if has_supabase_config():
-        return load_players_from_supabase()
-
-    query = f"""
-        select
-            j.id_jogador,
-            j.nome_jogador,
-            j.id_time,
-            j.temporada,
-            j.competicao,
-            j.posicao_detalhada_principal,
-            j.posicoes_detalhadas,
-            j.numero_camisa,
-            j.nacionalidade,
-            j.data_nascimento,
-            j.url_foto_jogador,
-            j.capturado_em_utc,
-            j.codigo_posicao_detalhada_principal,
-            j.posicao_principal,
-            j.codigos_posicoes_detalhadas,
-            t.nome_time,
-            t.nome_curto_time,
-            t.sigla_time,
-            t.cor_primaria_time,
-            t.cor_secundaria_time,
-            t.cor_texto_time,
-            t.url_escudo_time
-        from {SCHEMA}.jogadores j
-        join {SCHEMA}.times t
-          on t.id_time = j.id_time
-         and t.temporada = j.temporada
-        where j.temporada = %s
-          and coalesce(j.posicao_principal, '') <> 'revisar'
-        order by t.nome_time, j.nome_jogador
-    """
-
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, (CURRENT_SEASON,))
-            rows = cur.fetchall()
-
-    return [normalize_player(row) for row in rows]
+    return load_players_from_supabase()
 
 
 def inject_styles() -> None:
@@ -830,10 +766,10 @@ def main() -> None:
     )
     inject_styles()
 
-    missing_settings = get_missing_database_settings()
+    missing_settings = get_missing_supabase_settings()
     if missing_settings:
         st.error(
-            "Configuracao de banco incompleta. Defina as credenciais em Streamlit Secrets "
+            "Configuracao do Supabase incompleta. Defina as credenciais em Streamlit Secrets "
             "ou nas variaveis de ambiente antes de publicar o app."
         )
         st.code("\n".join(missing_settings))
@@ -841,11 +777,12 @@ def main() -> None:
 
     try:
         players = load_players()
-    except Exception:
+    except Exception as exc:
         st.error(
-            "Nao foi possivel carregar os dados do banco neste momento. "
-            "Revise os secrets do app e a conectividade com o banco."
+            "Nao foi possivel carregar os dados do Supabase neste momento. "
+            "Revise os secrets do app, o schema exposto e a conectividade."
         )
+        st.code(str(exc))
         return
 
     if not players:
