@@ -111,16 +111,57 @@ def ensure_list(value: Any) -> list[str]:
     return []
 
 
-def format_birth_date(value: date | None) -> str:
+def parse_date_value(value: Any) -> date | None:
     if value is None:
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str):
+        candidate = value.strip()
+        if not candidate:
+            return None
+        try:
+            return date.fromisoformat(candidate)
+        except ValueError:
+            try:
+                return datetime.fromisoformat(candidate.replace("Z", "+00:00")).date()
+            except ValueError:
+                return None
+    return None
+
+
+def parse_datetime_value(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time())
+    if isinstance(value, str):
+        candidate = value.strip()
+        if not candidate:
+            return None
+        try:
+            return datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
+
+
+def format_birth_date(value: date | None) -> str:
+    parsed_value = parse_date_value(value)
+    if parsed_value is None:
         return "Nao informado"
-    return value.strftime("%d/%m/%Y")
+    return parsed_value.strftime("%d/%m/%Y")
 
 
 def format_capture(value: datetime | None) -> str:
-    if value is None:
+    parsed_value = parse_datetime_value(value)
+    if parsed_value is None:
         return "Nao informado"
-    return value.strftime("%d/%m/%Y as %H:%M")
+    return parsed_value.strftime("%d/%m/%Y as %H:%M")
 
 
 def background_data_uri() -> str:
@@ -191,6 +232,8 @@ def normalize_player(row: dict[str, Any]) -> dict[str, Any]:
     alternate_positions = [position for position in positions if position != main_position]
     shirt_number = row.get("numero_camisa") or "--"
     team_name = row.get("nome_curto_time") or row.get("nome_time") or "Time indefinido"
+    birth_date = parse_date_value(row.get("data_nascimento"))
+    captured_at = parse_datetime_value(row.get("capturado_em_utc"))
     team_primary = row.get("cor_primaria_time") or "#101418"
     team_secondary = row.get("cor_secundaria_time") or "#8ca3b8"
     team_text = row.get("cor_texto_time") or "#f7fafc"
@@ -211,7 +254,9 @@ def normalize_player(row: dict[str, Any]) -> dict[str, Any]:
 
     return {
         **row,
-        "idade": calculate_age(row.get("data_nascimento")),
+        "data_nascimento": birth_date,
+        "capturado_em_utc": captured_at,
+        "idade": calculate_age(birth_date),
         "posicoes_detalhadas_list": positions,
         "posicoes_alternativas": alternate_positions,
         "posicao_label": main_position,
