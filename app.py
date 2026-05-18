@@ -10,6 +10,7 @@ from typing import Any
 import psycopg
 import streamlit as st
 from psycopg.rows import dict_row
+from supabase import Client, create_client
 
 
 SCHEMA = "br_2026"
@@ -52,11 +53,22 @@ def get_config(name: str, fallback: str | None = None) -> str | None:
     return os.getenv(name) or secret_values.get(name) or file_values.get(name) or fallback
 
 
+def get_supabase_key() -> str | None:
+    return get_config("SUPABASE_SECRET_KEY") or get_config("SUPABASE_SERVICE_ROLE_KEY")
+
+
+def has_supabase_config() -> bool:
+    return bool(get_config("SUPABASE_URL") and get_supabase_key())
+
+
 def has_database_url() -> bool:
     return bool(get_config("DATABASE_URL"))
 
 
 def get_missing_database_settings() -> list[str]:
+    if has_supabase_config():
+        return []
+
     if has_database_url():
         return []
 
@@ -68,6 +80,17 @@ def get_missing_database_settings() -> list[str]:
         "DATABASE_PASSWORD",
     ]
     return [field for field in required_fields if not get_config(field)]
+
+
+@lru_cache(maxsize=1)
+def get_supabase_client() -> Client:
+    supabase_url = get_config("SUPABASE_URL")
+    supabase_key = get_supabase_key()
+
+    if not supabase_url or not supabase_key:
+        raise ValueError("Supabase URL ou chave nao configurados.")
+
+    return create_client(supabase_url, supabase_key)
 
 
 def get_connection() -> psycopg.Connection:
@@ -145,8 +168,92 @@ def normalize_player(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def load_players_from_supabase() -> list[dict[str, Any]]:
+    supabase = get_supabase_client()
+
+    players_response = (
+        supabase.schema(SCHEMA)
+        .table("jogadores")
+        .select(
+            ",".join(
+                [
+                    "id_jogador",
+                    "nome_jogador",
+                    "id_time",
+                    "temporada",
+                    "competicao",
+                    "posicao_detalhada_principal",
+                    "posicoes_detalhadas",
+                    "numero_camisa",
+                    "nacionalidade",
+                    "data_nascimento",
+                    "url_foto_jogador",
+                    "capturado_em_utc",
+                    "codigo_posicao_detalhada_principal",
+                    "posicao_principal",
+                    "codigos_posicoes_detalhadas",
+                ]
+            )
+        )
+        .eq("temporada", CURRENT_SEASON)
+        .execute()
+    )
+
+    teams_response = (
+        supabase.schema(SCHEMA)
+        .table("times")
+        .select(
+            ",".join(
+                [
+                    "id_time",
+                    "temporada",
+                    "nome_time",
+                    "nome_curto_time",
+                    "sigla_time",
+                    "cor_primaria_time",
+                    "cor_secundaria_time",
+                    "cor_texto_time",
+                    "url_escudo_time",
+                ]
+            )
+        )
+        .eq("temporada", CURRENT_SEASON)
+        .execute()
+    )
+
+    players_data = players_response.data or []
+    teams_data = teams_response.data or []
+
+    teams_by_key = {
+        (team["id_time"], team["temporada"]): team
+        for team in teams_data
+    }
+
+    merged_rows: list[dict[str, Any]] = []
+    for player in players_data:
+        if (player.get("posicao_principal") or "") == "revisar":
+            continue
+
+        team = teams_by_key.get((player.get("id_time"), player.get("temporada")))
+        if not team:
+            continue
+
+        merged_rows.append({**player, **team})
+
+    merged_rows.sort(
+        key=lambda row: (
+            row.get("nome_time") or "",
+            row.get("nome_jogador") or "",
+        )
+    )
+    return [normalize_player(row) for row in merged_rows]
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_players() -> list[dict[str, Any]]:
+    if has_supabase_config():
+        return load_players_from_supabase()
+
     query = f"""
         select
             j.id_jogador,
