@@ -54,7 +54,7 @@ def get_config(name: str, fallback: str | None = None) -> str | None:
 
 
 def get_supabase_key() -> str | None:
-    return get_config("SUPABASE_SECRET_KEY") or get_config("SUPABASE_SERVICE_ROLE_KEY")
+    return get_config("SUPABASE_SERVICE_ROLE_KEY") or get_config("SUPABASE_SECRET_KEY")
 
 
 def has_supabase_config() -> bool:
