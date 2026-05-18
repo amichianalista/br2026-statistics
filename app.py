@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import html
 import os
 from functools import lru_cache
 from datetime import date, datetime
@@ -51,11 +52,19 @@ def get_config(name: str, fallback: str | None = None) -> str | None:
 
 
 def get_supabase_key() -> str | None:
-    return get_config("SUPABASE_SERVICE_ROLE_KEY") or get_config("SUPABASE_SECRET_KEY")
+    return get_config("SUPABASE_SECRET_KEY")
 
 
 def get_supabase_schema() -> str:
     return get_config("SUPABASE_SCHEMA", "public") or "public"
+
+
+def get_team_bucket() -> str | None:
+    return get_config("SUPABASE_BUCKET_TEAMS")
+
+
+def get_player_bucket() -> str | None:
+    return get_config("SUPABASE_BUCKET_PLAYERS")
 
 
 def has_supabase_config() -> bool:
@@ -69,7 +78,7 @@ def get_missing_supabase_settings() -> list[str]:
         missing_fields.append("SUPABASE_URL")
 
     if not get_supabase_key():
-        missing_fields.append("SUPABASE_SERVICE_ROLE_KEY or SUPABASE_SECRET_KEY")
+        missing_fields.append("SUPABASE_SECRET_KEY")
 
     return missing_fields
 
@@ -121,12 +130,84 @@ def background_data_uri() -> str:
     return f"data:image/png;base64,{encoded}"
 
 
+def is_absolute_asset_url(value: str) -> bool:
+    normalized = value.lower()
+    return normalized.startswith(("http://", "https://", "data:"))
+
+
+@lru_cache(maxsize=2048)
+def build_public_storage_url(bucket_name: str, asset_path: str) -> str:
+    return get_supabase_client().storage.from_(bucket_name).get_public_url(asset_path)
+
+
+def build_asset_placeholder(label: str, background: str, foreground: str) -> str:
+    safe_label = "".join(part[:1] for part in label.split()[:2]).upper() or "?"
+    svg = f"""
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 320">
+            <rect width="320" height="320" rx="36" fill="{html.escape(background)}" />
+            <text
+                x="50%"
+                y="54%"
+                text-anchor="middle"
+                font-family="Arial, sans-serif"
+                font-size="128"
+                font-weight="700"
+                fill="{html.escape(foreground)}"
+            >
+                {html.escape(safe_label)}
+            </text>
+        </svg>
+    """.strip()
+    encoded = base64.b64encode(svg.encode("utf-8")).decode("utf-8")
+    return f"data:image/svg+xml;base64,{encoded}"
+
+
+def resolve_asset_url(
+    value: Any,
+    bucket_name: str | None,
+    fallback_label: str,
+    fallback_background: str,
+    fallback_foreground: str,
+) -> str:
+    if isinstance(value, str):
+        candidate = value.strip()
+        if candidate:
+            if is_absolute_asset_url(candidate):
+                return candidate
+            if bucket_name:
+                normalized_path = candidate.lstrip("/")
+                return build_public_storage_url(bucket_name, normalized_path)
+
+    return build_asset_placeholder(
+        label=fallback_label,
+        background=fallback_background,
+        foreground=fallback_foreground,
+    )
+
+
 def normalize_player(row: dict[str, Any]) -> dict[str, Any]:
     positions = ensure_list(row.get("posicoes_detalhadas"))
     main_position = row.get("posicao_detalhada_principal") or row.get("posicao_principal") or "Posicao nao definida"
     alternate_positions = [position for position in positions if position != main_position]
     shirt_number = row.get("numero_camisa") or "--"
     team_name = row.get("nome_curto_time") or row.get("nome_time") or "Time indefinido"
+    team_primary = row.get("cor_primaria_time") or "#101418"
+    team_secondary = row.get("cor_secundaria_time") or "#8ca3b8"
+    team_text = row.get("cor_texto_time") or "#f7fafc"
+    resolved_team_crest = resolve_asset_url(
+        value=row.get("url_escudo_time"),
+        bucket_name=get_team_bucket(),
+        fallback_label=team_name,
+        fallback_background=team_primary,
+        fallback_foreground=team_text,
+    )
+    resolved_player_photo = resolve_asset_url(
+        value=row.get("url_foto_jogador"),
+        bucket_name=get_player_bucket(),
+        fallback_label=row.get("nome_jogador") or "Jogador",
+        fallback_background=team_secondary,
+        fallback_foreground=team_text,
+    )
 
     return {
         **row,
@@ -138,9 +219,11 @@ def normalize_player(row: dict[str, Any]) -> dict[str, Any]:
         "shirt_number_display": shirt_number,
         "competicao_display": row.get("competicao") or "Campeonato nao informado",
         "nacionalidade_display": row.get("nacionalidade") or "Nao informado",
-        "team_primary": row.get("cor_primaria_time") or "#101418",
-        "team_secondary": row.get("cor_secundaria_time") or "#8ca3b8",
-        "team_text": row.get("cor_texto_time") or "#f7fafc",
+        "team_primary": team_primary,
+        "team_secondary": team_secondary,
+        "team_text": team_text,
+        "team_crest_display_url": resolved_team_crest,
+        "player_photo_display_url": resolved_player_photo,
     }
 
 
@@ -615,11 +698,11 @@ def render_player_hero(player: dict[str, Any]) -> None:
                 <div class="hero-topline">
                     <div class="hero-tag">Pagina 1 - Bio</div>
                     <div class="team-badge">
-                        <img src="{player['url_escudo_time']}" alt="Escudo do time">
+                        <img src="{player['team_crest_display_url']}" alt="Escudo do time">
                     </div>
                 </div>
                 <div class="player-photo-wrap">
-                    <img src="{player['url_foto_jogador']}" alt="Foto do jogador">
+                    <img src="{player['player_photo_display_url']}" alt="Foto do jogador">
                 </div>
                 <div>
                     <div class="hero-name">{player['nome_jogador']}</div>
